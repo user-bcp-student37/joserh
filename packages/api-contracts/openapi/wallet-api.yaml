@@ -1,0 +1,475 @@
+openapi: 3.0.3
+info:
+  title: Wallet MVP Perú - API
+  version: 0.1.0
+  description: |
+    Contrato compartido entre frontend y backend, derivado de la épica y las seis historias.
+    - Montos en céntimos (entero) y moneda PEN.
+    - Roles que ingresan: CLIENTE (DNI) y COMERCIO (RUC). Soporte y operaciones no ingresan.
+    - Sesión de 300 s sin renovación.
+    - Modalidades de pago: QR_COMERCIO (siempre persona a comercio) y CONTACTO (persona a persona o persona a comercio).
+    - Los pagos se envían a un proveedor de prueba (mock). No hay extornos ni disputas.
+servers:
+  - url: http://localhost:8080
+    description: Local
+tags:
+  - name: Auth
+  - name: Cuentas
+  - name: Documentos
+  - name: Pagos
+  - name: Historial
+security:
+  - bearerAuth: []
+paths:
+  /auth/registro:
+    post:
+      tags: [Auth]
+      summary: Registrar cliente o comercio (cuenta queda PENDING)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegistroRequest' }
+      responses:
+        '201':
+          description: Cuenta creada en estado PENDING hasta activación manual.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Titular' }
+        '409': { $ref: '#/components/responses/Conflicto' }
+        '422': { $ref: '#/components/responses/Validacion' }
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Ingresar eligiendo rol (DNI o RUC, o correo, y contraseña)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Sesión de 300 segundos.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sesion' }
+        '401':
+          description: Credenciales inválidas (mensaje genérico).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Cuenta PENDING o REJECTED.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: Límite de intentos superado.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /auth/google:
+    post:
+      tags: [Auth]
+      summary: Ingresar con Google (cuentas de prueba autorizadas)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rol, id_token]
+              properties:
+                rol: { $ref: '#/components/schemas/Rol' }
+                id_token: { type: string }
+      responses:
+        '200':
+          description: Sesión de 300 segundos.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sesion' }
+        '401':
+          description: No autorizado.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Cerrar sesión
+      responses:
+        '204': { description: Sesión cerrada. }
+  /me:
+    get:
+      tags: [Cuentas]
+      summary: Titular autenticado y su límite por operación
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Titular' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+  /billeteras:
+    get:
+      tags: [Cuentas]
+      summary: Billeteras del titular (hasta tres)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Billetera' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+    post:
+      tags: [Cuentas]
+      summary: Crear billetera adicional (nace PENDING)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nombre_billetera]
+              properties:
+                nombre_billetera: { type: string }
+      responses:
+        '201':
+          description: Creada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Billetera' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '422': { $ref: '#/components/responses/Validacion' }
+  /documentos-deuda:
+    get:
+      tags: [Documentos]
+      summary: Documentos de deuda del comercio (solo COMERCIO)
+      parameters:
+        - in: query
+          name: estado
+          schema: { $ref: '#/components/schemas/EstadoDocumento' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DocumentoDeuda' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { $ref: '#/components/responses/Prohibido' }
+  /documentos-deuda/{id}/qr:
+    get:
+      tags: [Documentos]
+      summary: Obtener el QR del documento (solo COMERCIO dueño)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Contenido del QR.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentificadorPago' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { $ref: '#/components/responses/Prohibido' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+  /destinatarios/resolver:
+    post:
+      tags: [Pagos]
+      summary: Resolver destinatario de un pago a contacto (solo CLIENTE)
+      description: Identifica por DNI, celular o RUC. No revela si el dato existe cuando no corresponde a un destinatario válido.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tipo_identificador, valor]
+              properties:
+                tipo_identificador: { type: string, enum: [DNI, CELULAR, RUC] }
+                valor: { type: string }
+      responses:
+        '200':
+          description: Destinatario válido.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Destinatario' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { $ref: '#/components/responses/Prohibido' }
+  /pagos/intencion:
+    post:
+      tags: [Pagos]
+      summary: Crear intención de pago (solo CLIENTE ACTIVE)
+      description: |
+        QR_COMERCIO: se envía el contenido del QR; el monto lo fija el documento.
+        CONTACTO: se envía destinatario y monto. Queda PENDIENTE_CONFIRMACION hasta confirmar.
+        Requiere cabecera Idempotency-Key.
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IntencionPagoRequest' }
+      responses:
+        '201':
+          description: Intención creada, con destinatario y monto para confirmar.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaccion' }
+        '200':
+          description: Reintento con la misma clave; devuelve el resultado original.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaccion' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { $ref: '#/components/responses/Prohibido' }
+        '409': { $ref: '#/components/responses/Conflicto' }
+        '422': { $ref: '#/components/responses/Validacion' }
+  /pagos/{id}/confirmar:
+    post:
+      tags: [Pagos]
+      summary: Confirmar explícitamente el pago y enviarlo al proveedor de prueba
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses:
+        '200':
+          description: Resultado persistido (APROBADA, FALLIDA o PENDIENTE).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaccion' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '409': { $ref: '#/components/responses/Conflicto' }
+        '410':
+          description: Intención expirada (EXPIRADA).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /pagos/{id}:
+    get:
+      tags: [Pagos]
+      summary: Estado y comprobante de un pago (pagador o destinatario)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaccion' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+  /pagos:
+    get:
+      tags: [Historial]
+      summary: Historial de pagos enviados y recibidos del titular
+      parameters:
+        - in: query
+          name: direccion
+          schema: { type: string, enum: [ENVIADOS, RECIBIDOS] }
+        - in: query
+          name: estado
+          schema: { $ref: '#/components/schemas/EstadoPago' }
+        - in: query
+          name: modalidad
+          schema: { $ref: '#/components/schemas/ModalidadPago' }
+        - { in: query, name: desde, schema: { type: string, format: date } }
+        - { in: query, name: hasta, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Transaccion' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: true
+      description: Clave única por intención; un reintento con los mismos datos devuelve el resultado original.
+      schema: { type: string }
+  responses:
+    NoAutenticado:
+      description: Sesión ausente o vencida (300 s).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Prohibido:
+      description: El rol o el estado de la cuenta no permite la operación.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NoEncontrado:
+      description: No encontrado o sin acceso.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflicto:
+      description: Duplicado o conflicto de estado/idempotencia.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Validacion:
+      description: Datos inválidos (monto no positivo, moneda distinta de PEN, límite superado, saldo insuficiente, etc.).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Rol:
+      type: string
+      enum: [CLIENTE, COMERCIO]
+    EstadoCuenta:
+      type: string
+      enum: [PENDING, ACTIVE, REJECTED]
+    EstadoDocumento:
+      type: string
+      enum: [PENDIENTE, EN_PROCESO, PAGADA]
+    EstadoPago:
+      type: string
+      enum: [PENDIENTE_CONFIRMACION, PENDIENTE, APROBADA, FALLIDA, EXPIRADA]
+    ModalidadPago:
+      type: string
+      enum: [QR_COMERCIO, CONTACTO]
+    TipoPago:
+      type: string
+      enum: [PERSONA_A_PERSONA, PERSONA_A_COMERCIO]
+    Error:
+      type: object
+      required: [codigo, mensaje]
+      properties:
+        codigo: { type: string, example: CREDENCIALES_INVALIDAS }
+        mensaje: { type: string }
+        codigo_motivo: { type: string, nullable: true }
+    RegistroRequest:
+      type: object
+      required: [rol, documento, nombre, correo, contrasena]
+      properties:
+        rol: { $ref: '#/components/schemas/Rol' }
+        documento:
+          type: string
+          description: DNI (CLIENTE) o RUC (COMERCIO).
+        nombre: { type: string }
+        correo: { type: string, format: email }
+        celular: { type: string, description: Celular peruano. }
+        contrasena: { type: string, format: password }
+        limite_operacion_centimos:
+          type: integer
+          minimum: 1
+          description: Opcional; si se omite se usa el máximo aprobado.
+    LoginRequest:
+      type: object
+      required: [rol, identificador, contrasena]
+      properties:
+        rol: { $ref: '#/components/schemas/Rol' }
+        identificador:
+          type: string
+          description: Un solo dato, DNI o RUC según el rol, o correo.
+        contrasena: { type: string, format: password }
+    Sesion:
+      type: object
+      required: [token, expira_en_segundos, titular]
+      properties:
+        token: { type: string }
+        expira_en_segundos: { type: integer, example: 300 }
+        titular: { $ref: '#/components/schemas/Titular' }
+    Titular:
+      type: object
+      required: [id, rol, nombre, estado]
+      properties:
+        id: { type: string }
+        rol: { $ref: '#/components/schemas/Rol' }
+        nombre: { type: string }
+        estado: { $ref: '#/components/schemas/EstadoCuenta' }
+        limite_operacion_centimos: { type: integer }
+    Billetera:
+      type: object
+      required: [id, titular_id, tipo_titular, nombre_billetera, moneda, saldo_centimos, estado]
+      properties:
+        id: { type: string }
+        titular_id: { type: string }
+        tipo_titular: { $ref: '#/components/schemas/Rol' }
+        nombre_billetera: { type: string }
+        moneda: { type: string, enum: [PEN] }
+        saldo_centimos: { type: integer }
+        estado: { $ref: '#/components/schemas/EstadoCuenta' }
+    DocumentoDeuda:
+      type: object
+      required: [id, comercio_id, cuenta_destino_id, monto_centimos, moneda, estado]
+      properties:
+        id: { type: string }
+        comercio_id: { type: string }
+        cuenta_destino_id: { type: string }
+        monto_centimos: { type: integer, minimum: 1 }
+        moneda: { type: string, enum: [PEN] }
+        estado: { $ref: '#/components/schemas/EstadoDocumento' }
+    IdentificadorPago:
+      type: object
+      description: Contrato común del QR y del pago a contacto. Solo identifica; nunca autoriza el pago.
+      required: [version, origen, destinatario_id, hash]
+      properties:
+        version: { type: integer, example: 2 }
+        origen: { type: string, enum: [QR_COMERCIO, CONTACTO] }
+        destinatario_id: { type: string }
+        documento_deuda_id: { type: string, description: Solo QR_COMERCIO. }
+        hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+    Destinatario:
+      type: object
+      required: [destinatario_id, nombre, tipo_pago]
+      properties:
+        destinatario_id: { type: string }
+        nombre: { type: string }
+        tipo_pago: { $ref: '#/components/schemas/TipoPago' }
+    IntencionPagoRequest:
+      type: object
+      required: [modalidad_pago, cuenta_origen_id]
+      properties:
+        modalidad_pago: { $ref: '#/components/schemas/ModalidadPago' }
+        cuenta_origen_id: { type: string }
+        qr: { $ref: '#/components/schemas/IdentificadorPago' }
+        destinatario_id:
+          type: string
+          description: Solo CONTACTO.
+        monto_centimos:
+          type: integer
+          minimum: 1
+          description: Solo CONTACTO; en QR_COMERCIO lo fija el documento.
+        moneda: { type: string, enum: [PEN], default: PEN }
+    Transaccion:
+      type: object
+      required: [id, referencia, modalidad_pago, tipo_pago, cuenta_origen_id, cuenta_destino_id, monto_centimos, moneda, estado_actual]
+      properties:
+        id: { type: string }
+        referencia: { type: string }
+        modalidad_pago: { $ref: '#/components/schemas/ModalidadPago' }
+        tipo_pago: { $ref: '#/components/schemas/TipoPago' }
+        documento_deuda_id: { type: string, nullable: true }
+        cuenta_origen_id: { type: string }
+        cuenta_destino_id: { type: string }
+        destinatario_nombre: { type: string }
+        monto_centimos: { type: integer }
+        moneda: { type: string, enum: [PEN] }
+        estado_actual: { $ref: '#/components/schemas/EstadoPago' }
+        codigo_motivo: { type: string, nullable: true }
+        expira_en: { type: string, format: date-time, nullable: true }
+        creada_en: { type: string, format: date-time }
+        actualizada_en: { type: string, format: date-time }
